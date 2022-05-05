@@ -102,21 +102,23 @@ contact_kernel_fn dolfinx_contact::generate_kernel(
   // gap vector valued gdim
   // test_fn, u, u_opposite vector valued bs (should be bs = gdim)
   std::vector<std::size_t> cstrides = {
-      1,                                                       // mu
-      1,                                                       // lambda
-      1,                                                       // h
-      num_q_points * gdim,                                     // gap
-      num_q_points * gdim,                                     // normals
-      (tdim + 1) * num_q_points * ndofs_cell * bs * max_links, // test_fn
-      ndofs_cell * bs,                                         // u
-      num_q_points * bs * (tdim + 1),                          // u_opposite
+      1,                                            // mu
+      1,                                            // lambda
+      1,                                            // h
+      num_q_points * gdim,                          // gap
+      num_q_points * gdim,                          // normals
+      num_q_points * ndofs_cell * bs * max_links,   // test_fn
+      num_q_points * ndofs_cell * gdim * max_links, // grad of test_fn
+      ndofs_cell * bs,                              // u
+      num_q_points * bs,                            // u_opposite
+      num_q_points * bs * gdim,                     // grad of u_opposite
       num_q_points * tdim * gdim, // 1st derivative of transformation
       num_q_points * (tdim + 1) * tdim * gdim
           / 2 // 2nd derivative of transformation
   };
 
   // create offsets
-  std::vector<int32_t> offsets(11, 0);
+  std::vector<int32_t> offsets(13, 0);
   offsets[0] = 0;
   std::partial_sum(cstrides.cbegin(), cstrides.cend(),
                    std::next(offsets.begin()));
@@ -258,7 +260,7 @@ contact_kernel_fn dolfinx_contact::generate_kernel(
       double epsn_u = 0;
       for (std::size_t i = 0; i < ndofs_cell; i++)
       {
-        std::size_t block_index = offsets[6] + i * bs;
+        std::size_t block_index = offsets[7] + i * bs;
         for (std::size_t j = 0; j < bs; j++)
         {
           tr_u += c[block_index + j] * tr(i, j);
@@ -379,13 +381,6 @@ contact_kernel_fn dolfinx_contact::generate_kernel(
     std::array<double, 3> n_surf = {0, 0, 0};
     xt::xtensor<double, 2> tr({ndofs_cell, gdim});
     xt::xtensor<double, 2> epsn({ndofs_cell, gdim});
-    xt::xtensor<double, 2> J_link = xt::zeros<double>(
-        {gdim, (std::size_t)tdim}); // jacobian of linked cell to ref cell
-    xt::xtensor<double, 2> K_link // inverse jacobian of linked cell to ref cell
-        = xt::zeros<double>({(std::size_t)tdim, gdim});
-    xt::xtensor<double, 2> J_tot_link = xt::zeros<double>(
-        {J_link.shape(0),
-         J_link.shape(1) - 1});    // jacobian of linked facet to ref facet
     xt::xarray<double> du_tan(bs); // tangential derivative of trial function
     xt::xarray<double> du_tan_opp(
         bs); // tangential derivative of trial function at closest point
@@ -412,10 +407,7 @@ contact_kernel_fn dolfinx_contact::generate_kernel(
         n_surf[i] = -c[offsets[4] + q * gdim + i];
         n_dot += n_phys(i) * n_surf[i];
         gap += c[offsets[3] + q * gdim + i] * n_surf[i];
-        for (std::size_t j = 0; j < (std::size_t)tdim; j++)
-          J_link(i, j) = c[offsets[8] + q * tdim * gdim + i * tdim + j];
       }
-      dolfinx::fem::CoordinateElement::compute_jacobian_inverse(J_link, K_link);
 
       // precompute tr(eps(phi_j e_l)), eps(phi^j e_l)n*n2
       std::fill(tr.begin(), tr.end(), 0.0);
@@ -441,7 +433,7 @@ contact_kernel_fn dolfinx_contact::generate_kernel(
       double epsn_u = 0;
       for (std::size_t i = 0; i < ndofs_cell; i++)
       {
-        std::size_t block_index = offsets[6] + i * bs;
+        std::size_t block_index = offsets[7] + i * bs;
         for (std::size_t j = 0; j < bs; j++)
         {
           tr_u += c[block_index + j] * tr(i, j);
@@ -464,13 +456,10 @@ contact_kernel_fn dolfinx_contact::generate_kernel(
         for (std::size_t l = 0; l < gdim; ++l)
         {
 
-          for (std::size_t f = 0; f < tdim; ++f)
-          {
-            std::size_t index_u_opp_grad
-                = offsets[7] + (f + 1) * num_q_points * bs + q * bs + j;
+          std::size_t index_u_opp_grad
+              = offsets[9] + gdim * bs * q + j * gdim + l;
 
-            def_grad(j, l) += K_link(f, l) * c[index_u_opp_grad];
-          }
+          def_grad(j, l) += c[index_u_opp_grad];
         }
       }
       // compute inverse of deformation gradient
@@ -522,19 +511,14 @@ contact_kernel_fn dolfinx_contact::generate_kernel(
                 double v_n_opp = c[index_v] * n_surf[b];
 
                 // extract grad(v) - v test functions
-                grad_v.fill(0);
-                std::size_t offset_grad
-                    = offsets[5] + ndofs_cell * num_q_points * max_links * bs;
+                std::size_t offset_grad = offsets[6]
+                                          + k * num_q_points * ndofs_cell * gdim
+                                          + i * num_q_points * bs + q * gdim;
                 for (std::size_t r = 0; r < gdim; ++r)
-                  for (std::size_t s = 0; s < (std::size_t)tdim; ++s)
-                  {
-                    std::size_t index_v_grad
-                        = offset_grad
-                          + s * ndofs_cell * num_q_points * max_links * bs
-                          + k * ndofs_cell * num_q_points * bs
-                          + i * num_q_points * bs + q * bs + b;
-                    grad_v(r) += K_link(s, r) * c[index_v_grad];
-                  }
+                {
+
+                  grad_v(r) = c[offset_grad + r];
+                }
 
                 // compute (-n_y)^T grad(v)
                 n_dot_grad.fill(0.0);

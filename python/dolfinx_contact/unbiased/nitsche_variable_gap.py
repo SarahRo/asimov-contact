@@ -236,11 +236,17 @@ def nitsche_variable_gap(mesh: _mesh.Mesh, mesh_data: Tuple[_mesh.MeshTagsMetaCl
             n_0 = contact.pack_ny(0, gap_0)
             n_1 = contact.pack_ny(1, gap_1)
         with _common.Timer("~~Contact: Pack test functions"):
-            test_fn_0 = contact.pack_test_functions(0, gap_0, 1)
-            test_fn_1 = contact.pack_test_functions(1, gap_1, 1)
+            test_fn_0 = contact.pack_test_functions(0, gap_0)
+            test_fn_1 = contact.pack_test_functions(1, gap_1)
         with _common.Timer("~~Contact: Pack u contact"):
-            u_opp_0 = contact.pack_u_contact(0, u._cpp_object, gap_0, 1)
-            u_opp_1 = contact.pack_u_contact(1, u._cpp_object, gap_1, 1)
+            u_opp_0 = contact.pack_u_contact(0, u._cpp_object, gap_0)
+            u_opp_1 = contact.pack_u_contact(1, u._cpp_object, gap_1)
+        with _common.Timer("~~Contact: Pack grad(test functions)"):
+            test_grad_0 = contact.pack_grad_test_functions(0, gap_0, u_opp_0)
+            test_grad_1 = contact.pack_grad_test_functions(1, gap_1, u_opp_1)
+        with _common.Timer("~~Contact: Pack grad(u) contact"):
+            u_grad_0 = contact.pack_grad_u_contact(0, u._cpp_object, gap_0, u_opp_0)
+            u_grad_1 = contact.pack_grad_u_contact(1, u._cpp_object, gap_1, u_opp_1)
         with _common.Timer("~~Contact: Pack u"):
             u_0 = dolfinx_cuas.pack_coefficients([u], entities_0)
             u_1 = dolfinx_cuas.pack_coefficients([u], entities_1)
@@ -250,8 +256,8 @@ def nitsche_variable_gap(mesh: _mesh.Mesh, mesh_data: Tuple[_mesh.MeshTagsMetaCl
         with _common.Timer("~~Contact: Pack indices of contact facets"):
             facet_ind_0 = contact.pack_facet_indices(0)
             facet_ind_1 = contact.pack_facet_indices(1)
-        c_0 = np.hstack([coeff_0, gap_0, n_0, test_fn_0, u_0, u_opp_0, surf_der_0])
-        c_1 = np.hstack([coeff_1, gap_1, n_1, test_fn_1, u_1, u_opp_1, surf_der_1])
+        c_0 = np.hstack([coeff_0, gap_0, n_0, test_fn_0, test_grad_0, u_0, u_opp_0, u_grad_0, surf_der_0])
+        c_1 = np.hstack([coeff_1, gap_1, n_1, test_fn_1, test_grad_1, u_1, u_opp_1, u_grad_1, surf_der_1])
         coeffs[0][:, :] = c_0[:, :]
         coeffs[1][:, :] = c_1[:, :]
         coeffs[2][:, :] = facet_ind_0[:, :]

@@ -95,18 +95,30 @@ def test_pack_test_fn(ct, gap, q_deg, delta, surface):
     sorted_facets = np.argsort(indices)
     facet_marker = meshtags(mesh, tdim - 1, indices[sorted_facets], values[sorted_facets])
 
+    def func(x):
+        vals = np.zeros((gdim, x.shape[1]))
+        vals[0] = 0.1 * x[0]
+        vals[1] = 0.23 * x[1]
+        return vals
+
+    # Compute function that is known on each side
+    u = _fem.Function(V)
+    u.interpolate(func)
+
     # create contact class
     opposites = [1, 0]
     s = surface
     o = opposites[surface]
     contact = dolfinx_contact.cpp.Contact(facet_marker, [0, 1], V._cpp_object)
     contact.set_quadrature_degree(q_deg)
+    contact.update_submesh_geometry(u._cpp_object)
     contact.create_distance_map(s, o)
 
     # Pack gap on surface, pack test functions and jacobian on opposite surface
     gap = contact.pack_gap(s)
-    test_fn = contact.pack_test_functions(s, gap, 1)
-    surf_der = contact.pack_surface_derivatives(s, gap)
+    test_fn = contact.pack_test_functions(s, gap)
+    u_packed = contact.pack_u_contact(s, u._cpp_object, gap)
+    grad_test_fn = contact.pack_grad_test_functions(s, gap, u_packed)
 
     # Retrieve surface facets
     s_facets = np.sort(facets[s])
@@ -127,7 +139,7 @@ def test_pack_test_fn(ct, gap, q_deg, delta, surface):
 
         for i in range(num_q_points):
             for j in range(gdim):
-                points[i, j] = qp_phys[i, j] + gap[f][i * gdim + j]
+                points[i, j] = qp_phys[i, j] + gap[f][i * gdim + j] - u_packed[f][i * gdim + j]
 
         # retrieve connected facets
         connected_facets = lookup.links(f)
@@ -172,26 +184,14 @@ def test_pack_test_fn(ct, gap, q_deg, delta, surface):
                         offset = link * num_q_points * len(dofs) * bs + i * num_q_points * bs
                         assert(np.isclose(expr_vals[0][q * bs + k], test_fn[f][offset + q * bs + k]))
 
-                        # retrieve jacobian from surf_der and compute J^T*dv to compare values of derivatives
-                        J = np.zeros((gdim, tdim))
-                        dv_ref = np.zeros(tdim)
-                        offset = len(dofs) * num_q_points * bs * num_q_points + link * len(dofs) * bs * num_q_points
-                        for n in range(tdim):
-                            # retrieve values from packed derivativs
-                            dv_ref[n] = test_fn[f][offset + n
-                                                   * len(dofs) * num_q_points * bs * num_q_points
-                                                   + i * num_q_points * bs + q * bs + k]
-                            for m in range(gdim):
-                                # retrieve entries of jacobian
-                                J[m, n] = surf_der[f][q * tdim * gdim + m * tdim + n]
-
-                        # retrieve dv from expression values
-                        dv = np.zeros(gdim)
+                        # retrieve dv from expression values and packed test fn
+                        dv1 = np.zeros(gdim)
+                        dv2 = np.zeros(gdim)
+                        offset = link * num_q_points * len(dofs) * gdim + i * gdim * num_q_points
                         for m in range(gdim):
-                            dv[m] = expr_vals2[0][q * gdim + m]
-
-                        # compare J^T*dv and compare with packed derivatives
-                        assert(np.allclose(np.dot(np.transpose(J), dv), dv_ref))
+                            dv1[m] = expr_vals2[0][q * gdim + m]
+                            dv2[m] = grad_test_fn[f][offset + q * gdim + m]
+                        assert(np.allclose(dv1, dv2))
 
                     # loop over quadrature points connected to different facet
                     for q in zero_ind:
@@ -200,13 +200,12 @@ def test_pack_test_fn(ct, gap, q_deg, delta, surface):
                         offset = link * num_q_points * len(dofs) * bs + i * num_q_points * bs
                         assert(np.isclose(0, test_fn[f][offset + q * bs + k]))
 
-                        offset = len(dofs) * num_q_points * bs * num_q_points + link * len(dofs) * bs * num_q_points
-                        for n in range(tdim):
-                            # retrieve values from packed derivativs
-                            dv_ref[n] = test_fn[f][offset + n
-                                                   * len(dofs) * num_q_points * bs * num_q_points
-                                                   + i * num_q_points * bs + q * bs + k]
-                            assert(np.isclose(0, dv_ref[n]))
+                        # retrieve dv from expression values and packed test fn
+                        dv2 = np.zeros(gdim)
+                        offset = link * num_q_points * len(dofs) * gdim + i * gdim * num_q_points
+                        for m in range(gdim):
+                            dv2[m] = grad_test_fn[f][offset + q * gdim + m]
+                        assert(np.allclose(np.zeros(gdim), dv2))
 
 
 @ pytest.mark.parametrize("ct", ["quadrilateral", "triangle", "tetrahedron", "hexahedron"])
@@ -256,12 +255,13 @@ def test_pack_u(ct, gap, q_deg, delta, surface):
     o = opposites[surface]
     contact = dolfinx_contact.cpp.Contact(facet_marker, [0, 1], V._cpp_object)
     contact.set_quadrature_degree(q_deg)
+    contact.update_submesh_geometry(u._cpp_object)
     contact.create_distance_map(s, o)
 
     # Pack gap on surface, pack u opposite surface
     gap = contact.pack_gap(s)
-    u_opposite = contact.pack_u_contact(s, u._cpp_object, gap, 1)
-    surf_der = contact.pack_surface_derivatives(s, gap)
+    u_opposite = contact.pack_u_contact(s, u._cpp_object, gap)
+    grad_u_opposite = contact.pack_grad_u_contact(s, u._cpp_object, gap, u_opposite)
 
     # Retrieve surface facets
     s_facets = np.sort(facets[s])
@@ -282,7 +282,7 @@ def test_pack_u(ct, gap, q_deg, delta, surface):
 
         for i in range(num_q_points):
             for j in range(gdim):
-                points[i, j] = qp_phys[i, j] + gap[f][i * gdim + j]
+                points[i, j] = qp_phys[i, j] + gap[f][i * gdim + j] - u_opposite[f][i * gdim + j]
 
         # retrieve connected facets
         connected_facets = lookup.links(f)
@@ -329,15 +329,10 @@ def test_pack_u(ct, gap, q_deg, delta, surface):
                     for j in range(gdim):
                         vals1[j] = expr_vals[i * gdim + j]
 
-                    # jacobian and gradient from packed data
-                    J = np.zeros((gdim, tdim))
-                    vals2 = np.zeros(tdim)
-                    for j in range(tdim):
-                        index = (j + 1) * num_q_points * bs + q * bs + k
-                        vals2[j] = u_opposite[f][index]
-                        # retrieve jacobian
-                        for n in range(gdim):
-                            J[n, j] = surf_der[f][q * tdim * gdim + n * tdim + j]
+                    vals2 = np.zeros(gdim)
+                    for j in range(gdim):
+                        index = gdim * bs * q + k * gdim + j
+                        vals2[j] = grad_u_opposite[f][index]
 
                 # compare gradient from expression and u_opposite
-                assert(np.allclose(np.dot(np.transpose(J), vals1), vals2))
+                assert(np.allclose(vals1, vals2))

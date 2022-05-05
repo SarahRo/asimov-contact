@@ -938,51 +938,41 @@ public:
   /// @param[out] c - test functions packed on facets.
   std::pair<std::vector<PetscScalar>, int>
   pack_test_functions(int origin_meshtag,
-                      const xtl::span<const PetscScalar>& gap,
-                      std::size_t num_derivatives)
+                      const xtl::span<const PetscScalar>& gap)
   {
     // Mesh info
-    auto mesh = _submeshes[_opposites[origin_meshtag]].mesh(); // mesh
+    auto submesh = _submeshes[_opposites[origin_meshtag]];
+    auto mesh = submesh.mesh(); // mesh
     assert(mesh);
     const int gdim = mesh->geometry().dim(); // geometrical dimension
-    const int tdim = mesh->topology().dim();
-    const dolfinx::fem::CoordinateElement& cmap = mesh->geometry().cmap();
     auto x_dofmap = mesh->geometry().dofmap();
     xtl::span<const double> mesh_geometry = mesh->geometry().x();
-    auto element = _V->element();
-    const std::uint32_t bs = element->block_size();
-    mesh->topology_mutable().create_entity_permutations();
-
-    const std::vector<std::uint32_t> permutation_info
-        = mesh->topology().get_cell_permutation_info();
+    const std::size_t bs = _V->element()->block_size();
+    const std::size_t ndofs = _V->dofmap()->cell_dofs(0).size();
 
     // Select which side of the contact interface to loop from and get the
     // correct map
     auto map = _facet_maps[origin_meshtag];
     auto qp_phys = _qp_phys[origin_meshtag];
     auto puppet_facets = _cell_facet_pairs[origin_meshtag];
-    auto facet_map = _submeshes[_opposites[origin_meshtag]].facet_map();
+    auto facet_map = submesh.facet_map();
     const std::size_t max_links
         = *std::max_element(_max_links.begin(), _max_links.end());
     const std::size_t num_facets = puppet_facets.size();
     const std::size_t num_q_points = _qp_ref_facet[0].shape(0);
-    const std::int32_t ndofs = _V->dofmap()->cell_dofs(0).size();
-    std::vector<PetscScalar> c((num_derivatives * tdim + 1) * num_facets
-                                   * num_q_points * max_links * ndofs * bs,
-                               0.0);
-    const auto cstride = (int)(num_derivatives * tdim + 1) * num_q_points
-                         * max_links * ndofs * bs;
+
     xt::xtensor<double, 2> q_points
         = xt::zeros<double>({std::size_t(num_q_points), std::size_t(gdim)});
-    xt::xtensor<double, 2> dphi;
-    xt::xtensor<double, 3> J = xt::zeros<double>(
-        {std::size_t(num_q_points), std::size_t(gdim), std::size_t(tdim)});
-    xt::xtensor<double, 3> K = xt::zeros<double>(
-        {std::size_t(num_q_points), std::size_t(tdim), std::size_t(gdim)});
-    xt::xtensor<double, 1> detJ = xt::zeros<double>({num_q_points});
-    xt::xtensor<double, 4> phi(cmap.tabulate_shape(1, 1));
+
     std::vector<std::int32_t> perm(num_q_points);
     std::vector<std::int32_t> linked_cells(num_q_points);
+    auto V_sub = std::make_shared<dolfinx::fem::FunctionSpace>(
+        submesh.create_functionspace(_V));
+
+    // Create output vector
+    std::vector<PetscScalar> c(
+        num_facets * num_q_points * max_links * ndofs * bs, 0.0);
+    const auto cstride = int(num_q_points * max_links * ndofs * bs);
 
     // Loop over all facets
     for (std::size_t i = 0; i < num_facets; i++)
@@ -1032,27 +1022,38 @@ public:
         // Extract all physical points Pi(x) on a facet of linked_cell
         auto qp = xt::view(q_points, xt::keep(indices), xt::all());
         // Compute values of basis functions for all y = Pi(x) in qp
-        auto test_fn = dolfinx_contact::get_basis_functions(
-            J, K, detJ, qp, coordinate_dofs, linked_cell,
-            permutation_info[linked_cell], element, cmap, num_derivatives);
+        std::array<std::size_t, 4> b_shape
+            = evaluate_basis_shape(*V_sub, indices.size(), 0);
+        if (b_shape[3] > 1)
+          throw std::runtime_error("pack_test_functions assumes values size 1");
+        xt::xtensor<double, 4> basis_values(b_shape);
+        std::fill(basis_values.begin(), basis_values.end(), 0);
+        std::vector<std::int32_t> cells(indices.size(), linked_cell);
+        evaluate_basis_functions(*V_sub, qp, cells, basis_values, 0);
         // Insert basis function values into c
-        for (std::int32_t k = 0; k < ndofs; k++)
-          for (std::size_t q = 0; q < test_fn.shape(1); ++q)
+        for (std::size_t k = 0; k < ndofs; k++)
+          for (std::size_t q = 0; q < indices.size(); ++q)
             for (std::size_t l = 0; l < bs; l++)
-              for (std::size_t d = 0; d < num_derivatives * tdim + 1; ++d)
-
-              {
-                c[i * cstride + d * ndofs * bs * num_q_points * max_links
-                  + j * ndofs * bs * num_q_points + k * bs * num_q_points
-                  + indices[q] * bs + l]
-                    = test_fn(d, q, k * bs + l, l);
-              }
+            {
+              c[i * cstride + j * ndofs * bs * num_q_points
+                + k * bs * num_q_points + indices[q] * bs + l]
+                  = basis_values(0, q, k, 0);
+            }
       }
     }
 
     return {std::move(c), cstride};
   }
-
+  /// Compute gradient of test functions on opposite surface (initial
+  /// configuration) at quadrature points of facets
+  /// @param[in] orgin_meshtag - surface on which to integrate
+  /// @param[in] gap - gap packed on facets per quadrature point
+  /// @param[in] u_packed -u packed on opposite surface per quadrature point
+  /// @param[out] c - test functions packed on facets.
+  std::pair<std::vector<PetscScalar>, int>
+  pack_grad_test_functions(int origin_meshtag,
+                           const xtl::span<const PetscScalar>& gap,
+                           const xtl::span<const PetscScalar>& u_packed);
   /// Compute function on opposite surface at quadrature points of
   /// facets
   /// @param[in] orgin_meshtag - surface on which to integrate
@@ -1061,15 +1062,13 @@ public:
   std::pair<std::vector<PetscScalar>, int>
   pack_u_contact(int origin_meshtag,
                  std::shared_ptr<dolfinx::fem::Function<PetscScalar>> u,
-                 const xtl::span<const PetscScalar> gap,
-                 std::size_t num_derivatives)
+                 const xtl::span<const PetscScalar> gap)
   {
     dolfinx::common::Timer t("Pack contact u");
     // Mesh info
     auto submesh = _submeshes[_opposites[origin_meshtag]];
     auto mesh = submesh.mesh();                      // mesh
     const std::size_t gdim = mesh->geometry().dim(); // geometrical dimension
-    const std::size_t tdim = mesh->topology().dim(); // topological dimension
     const std::size_t bs_element = _V->element()->block_size();
 
     // Select which side of the contact interface to loop from and get the
@@ -1086,82 +1085,90 @@ public:
     assert(sub_dofmap);
     const int bs_dof = sub_dofmap->bs();
 
-    std::array<std::size_t, 4> b_shape = evaluate_basis_shape(
-        *V_sub, num_facets * num_q_points, num_derivatives);
+    std::array<std::size_t, 4> b_shape
+        = evaluate_basis_shape(*V_sub, num_facets * num_q_points, 0);
     xt::xtensor<double, 4> basis_values(b_shape);
     std::fill(basis_values.begin(), basis_values.end(), 0);
     std::vector<std::int32_t> cells(num_facets * num_q_points, -1);
-    {
-      // Copy function from parent mesh
-      submesh.copy_function(*u, u_sub);
 
-      xt::xtensor<double, 2> points
-          = xt::zeros<double>({num_facets * num_q_points, gdim});
-      for (std::size_t i = 0; i < num_facets; ++i)
+    // Copy function from parent mesh
+    submesh.copy_function(*u, u_sub);
+
+    xt::xtensor<double, 2> points
+        = xt::zeros<double>({num_facets * num_q_points, gdim});
+    for (std::size_t i = 0; i < num_facets; ++i)
+    {
+      auto links = map->links(i);
+      assert(links.size() == num_q_points);
+      for (std::size_t q = 0; q < num_q_points; ++q)
       {
-        auto links = map->links(i);
-        assert(links.size() == num_q_points);
-        for (std::size_t q = 0; q < num_q_points; ++q)
+        const std::size_t row = i * num_q_points;
+        for (std::size_t j = 0; j < gdim; ++j)
         {
-          const std::size_t row = i * num_q_points;
-          for (std::size_t j = 0; j < gdim; ++j)
-          {
-            points(row + q, j)
-                = qp_phys[i](q, j) + gap[row * gdim + q * gdim + j];
-            auto linked_pair = facet_map->links(links[q]);
-            cells[row + q] = linked_pair[0];
-          }
+          points(row + q, j)
+              = qp_phys[i](q, j) + gap[row * gdim + q * gdim + j];
+          auto linked_pair = facet_map->links(links[q]);
+          cells[row + q] = linked_pair[0];
         }
       }
-
-      evaluate_basis_functions(*u_sub.function_space(), points, cells,
-                               basis_values, num_derivatives);
     }
+
+    evaluate_basis_functions(*u_sub.function_space(), points, cells,
+                             basis_values, 0);
 
     const xtl::span<const PetscScalar>& u_coeffs = u_sub.x()->array();
 
     // Output vector
-    std::vector<PetscScalar> c((num_derivatives * tdim + 1) * num_facets
-                                   * num_q_points * bs_element,
-                               0.0);
+    std::vector<PetscScalar> c(num_facets * num_q_points * bs_element, 0.0);
 
     // Create work vector for expansion coefficients
-    const auto cstride
-        = int(num_q_points * bs_element * (1 + num_derivatives * tdim));
+    const auto cstride = int(num_q_points * bs_element);
     const std::size_t num_basis_functions = basis_values.shape(2);
     const std::size_t value_size = basis_values.shape(3);
+    if (value_size > 1)
+      throw std::runtime_error("pack_u_contact assumes values size 1");
     std::vector<PetscScalar> coefficients(num_basis_functions * bs_element);
     for (std::size_t i = 0; i < num_facets; ++i)
     {
-      for (std::size_t j = 0; j < 1 + num_derivatives * tdim; ++j)
-        for (std::size_t q = 0; q < num_q_points; ++q)
-        {
-          // Get degrees of freedom for current cell
-          xtl::span<const std::int32_t> dofs
-              = sub_dofmap->cell_dofs(cells[i * num_q_points + q]);
-          for (std::size_t j = 0; j < dofs.size(); ++j)
-            for (int k = 0; k < bs_dof; ++k)
-              coefficients[bs_dof * j + k] = u_coeffs[bs_dof * dofs[j] + k];
+      for (std::size_t q = 0; q < num_q_points; ++q)
+      {
+        // Get degrees of freedom for current cell
+        xtl::span<const std::int32_t> dofs
+            = sub_dofmap->cell_dofs(cells[i * num_q_points + q]);
+        for (std::size_t j = 0; j < dofs.size(); ++j)
+          for (int k = 0; k < bs_dof; ++k)
+            coefficients[bs_dof * j + k] = u_coeffs[bs_dof * dofs[j] + k];
 
-          // Compute expansion
-          for (std::size_t k = 0; k < bs_element; ++k)
+        // Compute expansion
+        for (std::size_t k = 0; k < bs_element; ++k)
+        {
+          for (std::size_t l = 0; l < num_basis_functions; ++l)
           {
-            for (std::size_t l = 0; l < num_basis_functions; ++l)
+            for (std::size_t m = 0; m < value_size; ++m)
             {
-              for (std::size_t m = 0; m < value_size; ++m)
-              {
-                c[cstride * i + j * num_q_points * bs_element + q * bs_element
-                  + k]
-                    += coefficients[bs_element * l + k]
-                       * basis_values(j, num_q_points * i + q, l, m);
-              }
+              c[cstride * i + q * bs_element + k]
+                  += coefficients[bs_element * l + k]
+                     * basis_values(0, num_q_points * i + q, l, m);
             }
           }
         }
+      }
     }
     t.stop();
     return {std::move(c), cstride};
   }
+
+  /// Compute gradient of function on opposite surface at quadrature points of
+  /// facets
+  /// @param[in] orgin_meshtag - surface on which to integrate
+  /// @param[in] gap - gap packed on facets per quadrature point
+  /// @param[in] u_packed -u packed on opposite surface per quadrature point
+  /// @param[out] c - test functions packed on facets.
+  std::pair<std::vector<PetscScalar>, int>
+  pack_grad_u_contact(int origin_meshtag,
+                      std::shared_ptr<dolfinx::fem::Function<PetscScalar>> u,
+                      const xtl::span<const PetscScalar> gap,
+                      const xtl::span<const PetscScalar> u_packed);
 
   /// Compute inward surface normal at Pi(x)
   /// @param[in] orgin_meshtag - surface on which to integrate
