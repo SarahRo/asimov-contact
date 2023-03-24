@@ -314,6 +314,44 @@ PYBIND11_MODULE(cpp, m)
             return dolfinx_wrappers::as_pyarray(std::move(coeffs),
                                                 std::array{shape0, cstride});
           })
+
+      .def("get_submesh_facets",
+           [](dolfinx_contact::Contact& self, const py::array_t<std::int32_t, py::array::c_style>& entities)
+           {
+            auto facets
+            = std::span<const std::int32_t>(entities.data(), entities.size());
+            std::vector<std::int32_t> facet_tuples(2 * facets.size());
+                const dolfinx::mesh::Topology& topology = self.mesh()->topology();
+                int tdim = topology.dim();
+                  
+            auto f_to_c = topology.connectivity(tdim - 1, tdim);
+            assert(f_to_c);
+            auto c_to_f = topology.connectivity(tdim, tdim - 1);
+            assert(c_to_f);
+            for (std::size_t f = 0; f < facets.size(); f++)
+            {
+              assert(f_to_c->num_links(facets[f]) == 1);
+              const std::int32_t cell = f_to_c->links(facets[f])[0];
+              auto cell_facets = c_to_f->links(cell);
+
+              auto facet_it
+                  = std::find(cell_facets.begin(), cell_facets.end(), facets[f]);
+              assert(facet_it != cell_facets.end());
+              facet_tuples[2*f] = cell;
+              facet_tuples[2*f+1] = (std::int32_t)std::distance(cell_facets.begin(), facet_it);
+            }
+             const dolfinx_contact::SubMesh& submesh = self.submesh();
+             std::vector<std::int32_t> submesh_facet_tuples = submesh.get_submesh_tuples(facet_tuples);
+             const int fdim = tdim - 1; // topological dimension of facet
+             auto c_to_f_sub = submesh.mesh()->topology().connectivity(tdim, fdim);
+             std::vector<std::int32_t> submesh_facets(facets.size());
+             for (std::size_t f =0; f<facets.size();++f){
+                  std::int32_t cell = submesh_facet_tuples[2*f];
+                  std::int32_t f_index = submesh_facet_tuples[2*f +1];
+                  submesh_facets[f] = c_to_f_sub->links(cell)[f_index];
+             }
+             return submesh_facets;
+           })
       .def("update_submesh_geometry",
            &dolfinx_contact::Contact::update_submesh_geometry);
   m.def(

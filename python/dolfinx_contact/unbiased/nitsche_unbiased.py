@@ -402,13 +402,75 @@ def nitsche_unbiased(steps: int, ufl_form: ufl.Form, u: fem.Function,
     timings = []
     newton_its = []
     krylov_its = []
+    tdim = mesh.topology.dim
+
+    def side_surfaces(x):
+        bottom_1 = np.logical_and(x[0] < 1.0, np.isclose(x[1], -0.5))
+        bottom_2 = np.logical_and(x[0] < 1.0, np.isclose(x[1], 0.5))
+        top_1 = np.logical_and(x[0] > 1.0, np.isclose(x[2], -0.5))
+        top_2 = np.logical_and(x[0] > 1.0, np.isclose(x[2], 0.5))
+        return np.logical_or(np.logical_or(bottom_1, bottom_2), np.logical_or(top_1, top_2))
+
+    facets_sides = _mesh.locate_entities_boundary(mesh, tdim - 1, side_surfaces)
     for tt in range(steps):
         log.log(log.LogLevel.WARNING, "Time step " + str(tt + 1) + " of " + str(steps)
                 + " +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
         # create distance map
         with common.Timer("~Contact: Distance maps"):
             for i in range(len(contact_pairs)):
+                print(i, tt)
                 contact.create_distance_map(i)
+                surface_value = int(contact_surfaces.links(0)[contact_pairs[i][0]])
+                facet_map = contact.facet_map(i)
+                c_to_f = mesh.topology.connectivity(tdim, tdim - 1)
+                num_facets = entities[i].shape[0]
+                facet_origin = np.zeros(num_facets, dtype=np.int32)
+                for j in range(num_facets):
+                    cell = entities[i][j, 0]
+                    f_index = entities[i][j, 1]
+                    facet_origin[j] = c_to_f.links(cell)[f_index]
+                _, ind, _ = np.intersect1d(facet_origin, facets_sides, return_indices=True)
+                ind = np.hstack([ind, num_facets + ind])
+                values = np.hstack([np.arange(0, len(facet_origin), 1, dtype=np.int32),
+                                   np.arange(0, len(facet_origin), 1, dtype=np.int32)])
+                indices = np.zeros(2 * len(facet_origin), dtype=np.int32)
+                num_points = 0
+                for j in range(num_facets):
+                    # print(facet_map.links(j))
+                    num_points = max(num_points, len(facet_map.links(j)))
+                for q in range(num_points):
+                    indices[:num_facets] = facet_origin[:]
+                    for j in range(num_facets):
+                        num_links = len(facet_map.links(j))
+                        if num_links > q:
+                            indices[num_facets + j] = facet_map.links(j)[q]
+                        else:
+                            indices[num_facets + j] = -1
+
+                    clean_indices = indices[ind]
+                    clean_values = values[ind]
+                    clean_values = clean_values[clean_indices >= 0]
+                    clean_indices = clean_indices[clean_indices >= 0]
+                    submesh_indices = np.array(contact.get_submesh_facets(clean_indices), dtype=np.int32)
+                    sorted_ind = np.argsort(submesh_indices)
+                    submesh = contact.submesh()
+                    map_marker = cpp.mesh.MeshTags_int32(
+                        submesh, submesh.topology.dim - 1, submesh_indices[sorted_ind], clean_values[sorted_ind])
+                    map_marker.name = "facet_marker"
+
+                    xdmf = cpp.io.XDMFFile(submesh.comm, f"facet_map_{tt}_{i}_{q}.xdmf", "w")
+                    xdmf.write_mesh(submesh, xpath="/Xdmf/Domain")
+                    xdmf.write_meshtags(map_marker)
+                    del (xdmf)
+
+                    sorted_indices = np.argsort(clean_indices)
+                    map_marker = _mesh.meshtags(mesh, mesh.topology.dim - 1,
+                                                clean_indices[sorted_indices], clean_values[sorted_indices])
+                    map_marker.name = "facet_marker"
+
+                    with io.XDMFFile(mesh.comm, f"facet_map_{tt}_{i}_{q}_original.xdmf", "w") as xdmf:
+                        xdmf.write_mesh(mesh)
+                        xdmf.write_meshtags(map_marker)
 
         # current time
         t = (tt + 1) / steps

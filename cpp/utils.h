@@ -581,6 +581,8 @@ compute_raytracing_map(const dolfinx::mesh::Mesh& quadrature_mesh,
   for (std::size_t i = 0; i < quadrature_facets.size(); i += 2)
   {
     std::size_t count_missing_matches = 0; // counter for missing contact points
+    std::size_t count_matches = 0;
+    std::vector<std::size_t> match_indices(num_q_points);
 
     // Determine candidate facets within search radius
     // FIXME: This is not the most efficient way of finding close facets
@@ -697,8 +699,11 @@ compute_raytracing_map(const dolfinx::mesh::Mesh& quadrature_mesh,
         if (status > 0)
         {
           cell_idx = cand_patch[c];
+          match_indices[count_matches] = c;
+          count_matches += 1;
           // Break loop
           c = cand_patch.size();
+          
         }
       }
       if (status > 0)
@@ -720,7 +725,10 @@ compute_raytracing_map(const dolfinx::mesh::Mesh& quadrature_mesh,
     // quadrature points
     if (count_missing_matches > 0 && count_missing_matches < num_q_points)
     {
-      std::vector<std::int32_t> cand_facets_patch(2 * cand_patch.size());
+      match_indices.resize(count_matches);
+      dolfinx::radix_sort(std::span<std::size_t>(match_indices));
+      match_indices.erase(std::unique(match_indices.begin(), match_indices.end()), match_indices.end());
+      std::vector<std::int32_t> cand_facets_patch(2 * match_indices.size());
       std::vector<double> padded_qpsb(count_missing_matches * 3);
       dolfinx_contact::mdspan2_t padded_qps(padded_qpsb.data(),
                                             count_missing_matches, 3);
@@ -734,10 +742,10 @@ compute_raytracing_map(const dolfinx::mesh::Mesh& quadrature_mesh,
           padded_qps(j, k) = qps(i / 2, missing_matches[j], k);
 
       // Retrieve candidate facets as (cell, local_facet) pair
-      for (std::size_t c = 0; c < cand_patch.size(); ++c)
+      for (std::size_t c = 0; c < match_indices.size(); ++c)
       {
-        cand_facets_patch[2 * c] = candidate_facets[2 * cand_patch[c]];
-        cand_facets_patch[2 * c + 1] = candidate_facets[2 * cand_patch[c] + 1];
+        cand_facets_patch[2 * c] = candidate_facets[2 * cand_patch[match_indices[c]]];
+        cand_facets_patch[2 * c + 1] = candidate_facets[2 * cand_patch[match_indices[c]] + 1];
       }
       // find closest enities
       auto [closest_entities, reference_points_2, shape_2]
